@@ -1,4 +1,4 @@
-# goreleaser-slsa-provenance
+# How to generate SLSA provenance for your artifacts built by GoReleaser?
 
 [SLSA](https://slsa.dev) (Supply Chain Levels for Software Artifacts) provenance is a framework for recording and verifying the integrity and security of software components throughout their lifecycle, from development to deployment.
 
