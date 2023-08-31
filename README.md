@@ -332,9 +332,9 @@ d162530242 | jq -r '.Attestation' | jq
 
 </details>
 
-or, you can use a fancy UI provided by the Chainguard team: `rekor.tlog.dev`:
+or, you can use a fancy UI provided by the Chainguard team: `search.sigstore.dev`:
 
-> _<https://rekor.tlog.dev/?uuid=24296fb24b8ad77a395fedaf1d422c0b839acc9a24aa5377af9163c453060d0111cfcb2120f9d02a>_
+> _<https://search.sigstore.dev?uuid=24296fb24b8ad77a395fedaf1d422c0b839acc9a24aa5377af9163c453060d0111cfcb2120f9d02a>_
 
 Then, you can verify the signature of the generated provenance file and verify the artifacts by using the following command:
 
