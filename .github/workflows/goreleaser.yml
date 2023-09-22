@@ -5,16 +5,17 @@ on:
     tags:
       - "v*" # triggers only if push new tag version, like `0.8.4` or else
 
-permissions:
-  contents: read
-
 jobs:
   goreleaser:
     outputs:
-      hashes: ${{ steps.hash.outputs.hashes }}
-    permissions:
-      contents: write  # for goreleaser/goreleaser-action to create a GitHub release
+      hashes: ${{ steps.binary.outputs.hashes }}
+      image: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.image.outputs.digest }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+     # id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # v2.3.4
@@ -25,47 +26,77 @@ jobs:
         with:
           go-version: "1.20"
           check-latest: true
+      - uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run GoReleaser
-        id: run-goreleaser
+        id: goreleaser
         uses: goreleaser/goreleaser-action@8f67e590f2d095516493f017008adc464e63adb1 # v2.5.0
         with:
           version: latest
           args: release --rm-dist
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION_LDFLAGS: ${{ steps.ldflags.outputs.version }}
-      - name: Generate subject
-        id: hash
+      - name: Generate binary hashes
+        id: binary
         env:
-          ARTIFACTS: "${{ steps.run-goreleaser.outputs.artifacts }}"
+          ARTIFACTS: "${{ steps.goreleaser.outputs.artifacts }}"
         run: |
           set -euo pipefail
 
           checksum_file=$(echo "$ARTIFACTS" | jq -r '.[] | select (.type=="Checksum") | .path')
           echo "hashes=$(cat $checksum_file | base64 -w0)" >> "$GITHUB_OUTPUT"
+      - name: Image digest
+        id: image
+        env:
+          ARTIFACTS: "${{ steps.goreleaser.outputs.artifacts }}"
+        run: |
+          set -euo pipefail
+          image_and_digest=$(echo "$ARTIFACTS" | jq -r '.[] | select (.type=="Docker Manifest") | .path')
+          image=$(echo "${image_and_digest}" | cut -d'@' -f1 | cut -d':' -f1)
+          digest=$(echo "${image_and_digest}" | cut -d'@' -f2)
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-  provenance:
+  binary-provenance:
     needs: [goreleaser]
     permissions:
       actions: read # To read the workflow path.
       id-token: write # To sign the provenance.
       contents: write # To add assets to a release.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.5.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.9.0
     with:
       base64-subjects: "${{ needs.goreleaser.outputs.hashes }}"
       upload-assets: true # upload to a new release
-  verification:
-    needs: [goreleaser, provenance]
+
+  image-provenance:
+    needs: [goreleaser]
+    permissions:
+      actions: read
+      id-token: write
+      packages: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.9.0
+    with:
+      image: ${{ needs.goreleaser.outputs.image }}
+      digest: ${{ needs.goreleaser.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  verification-with-slsa-verifier:
+    needs: [goreleaser, binary-provenance]
     runs-on: ubuntu-latest
     permissions: read-all
     steps:
       - name: Install the verifier
-        uses: slsa-framework/slsa-verifier/actions/installer@v2.1.0
+        uses: slsa-framework/slsa-verifier/actions/installer@v2.4.0
 
       - name: Download assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PROVENANCE: "${{ needs.provenance.outputs.provenance-name }}"
+          PROVENANCE: "${{ needs.binary-provenance.outputs.provenance-name }}"
         run: |
           set -euo pipefail
           gh -R "$GITHUB_REPOSITORY" release download "$GITHUB_REF_NAME" -p "*.tar.gz"
@@ -74,7 +105,7 @@ jobs:
       - name: Verify assets
         env:
           CHECKSUMS: ${{ needs.goreleaser.outputs.hashes }}
-          PROVENANCE: "${{ needs.provenance.outputs.provenance-name }}"
+          PROVENANCE: "${{ needs.binary-provenance.outputs.provenance-name }}"
         run: |
           set -euo pipefail
           checksums=$(echo "$CHECKSUMS" | base64 -d)
@@ -86,3 +117,29 @@ jobs:
                                             --source-tag "$GITHUB_REF_NAME" \
                                             "$fn"
           done <<<"$checksums"
+
+  verification-with-cosign:
+    needs: [goreleaser, image-provenance]
+    runs-on: ubuntu-latest
+    permissions: read-all
+    steps:
+      - name: Login
+        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@11086d25041f77fe8fe7b9ea4e48e3b9192b8f19 # v3.1.2
+
+      - name: Verify image
+        env:
+          IMAGE: ${{ needs.goreleaser.outputs.image }}
+          DIGEST: ${{ needs.goreleaser.outputs.digest }}
+        run: |
+          cosign verify-attestation \
+             --type slsaprovenance \
+             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+             --certificate-identity-regexp '^https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+$' \
+             $IMAGE@$DIGEST
